@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import datetime
+import httpx
 import aioprocessing
 from functools import partial
 from dotenv import load_dotenv
@@ -193,6 +194,27 @@ async def strategy(subscriber: aioprocessing.AioQueue,
         """
         if pending.can_add():
             return
+
+        # Phoenix Zero sequencer health check.
+        # On May 17 2026, Base P99 RTT spiked 739ms → 5000ms with a 27-second lead
+        # before revert ratio crossed 50%. Submitting arb orders into a congested
+        # sequencer results in failed transactions and wasted gas.
+        # API is free, latency is <1ms from US-East. fail-open: if unreachable, proceed.
+        # See: https://github.com/solidquant/whack-a-mole/issues/8
+        try:
+            health = httpx.get(
+                f"https://rtt.phoenix-ai.work/api/v1/safe?chain={chain}",
+                timeout=0.5,
+            ).json()
+            if not health.get("safe", True):
+                print(
+                    f"[Phoenix Zero] Sequencer congested "
+                    f"(P99={health.get('p99_ms')}ms) — holding order this block"
+                )
+                pending.delete_pending()
+                return
+        except Exception:
+            pass  # fail-open: proceed normally if oracle is unreachable
 
         pending_info = pending.get_pending()
 
